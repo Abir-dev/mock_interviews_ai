@@ -1,54 +1,48 @@
 'use server'
 
 import { feedbackSchema } from "@/constants";
-import { db } from "@/firebase/admin";
+import { prisma } from "@/lib/prisma";
 import { google } from "@ai-sdk/google";
 import { generateObject } from "ai";
 
-export async function getInterviewsByUserId(userId: string): Promise<Interview[] | null> {
-    const interviews = await db.collection('interviews')
-    .where('userId', '==', userId)
-    .orderBy('createdAt', 'desc')
-    .get();
+export async function getInterviewsByUserId(userId: string) {
+    const interviews = await prisma.interview.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+    });
 
-    return interviews.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-    })) as Interview[];
+    return interviews;
 }
 
-export async function getLatestInterviews(params: GetLatestInterviewsParams): Promise<Interview[] | null> {
+export async function getLatestInterviews(params: { userId: string, limit?: number }) {
     const { userId, limit = 20 } = params;
 
-    const interviews = await db
-    .collection('interviews')
-    .where('userId', '!=', userId)
-    .where('finalized', '==', true)
-    .orderBy('createdAt', 'desc')
-    .limit(limit)
-    .get();
+    const interviews = await prisma.interview.findMany({
+        where: { 
+            userId: { not: userId },
+            finalized: true 
+        },
+        orderBy: { createdAt: 'desc' },
+        take: limit,
+    });
 
-    return interviews.docs.map((doc) => ({
-        id: doc.id,
-        ...doc.data(),
-    })) as Interview[];
+    return interviews;
 }
 
-export async function getInterviewById(id: string): Promise<Interview | null> {
-    const interview = await db
-    .collection('interviews')
-    .doc(id)
-    .get();
+export async function getInterviewById(id: string) {
+    const interview = await prisma.interview.findUnique({
+        where: { id }
+    });
 
-    return interview.data() as Interview | null;
+    return interview;
 }
 
-export async function CreateFeedback(params: CreateFeedbackParams) {
+export async function CreateFeedback(params: { interviewId: string, userId: string, transcript: { role: string; content: string }[] }) {
   const { interviewId, userId, transcript } = params;
 
   try {
     const formattedTranscript = transcript
-      .map((sentence: { role: string; content: string }) => `- ${sentence.role}: ${sentence.content}\n`)
+      .map((sentence) => `- ${sentence.role}: ${sentence.content}\n`)
       .join('');
 
     const generated = await generateObject({
@@ -84,15 +78,16 @@ export async function CreateFeedback(params: CreateFeedbackParams) {
       finalAssessment,
     } = generated.object;
 
-    const feedback = await db.collection('feedback').add({
-      interviewId,
-      userId,
-      totalScore,
-      categoryScores,
-      strengths,
-      areasForImprovement,
-      finalAssessment,
-      createdAt: new Date().toISOString(),
+    const feedback = await prisma.feedback.create({
+      data: {
+        interviewId,
+        userId,
+        totalScore,
+        categoryScores: categoryScores as any,
+        strengths,
+        areasForImprovement,
+        finalAssessment,
+      }
     });
 
     return {
@@ -105,22 +100,18 @@ export async function CreateFeedback(params: CreateFeedbackParams) {
   }
 }
 
-export async function GetFeedbackByInterviewId(params: GetFeedbackByInterviewIdParams): Promise<Feedback | null> {
+export async function GetFeedbackByInterviewId(params: { interviewId: string, userId: string }) {
     const { interviewId, userId } = params;
 
-    const feedback = await db
-    .collection('feedback')
-    .where('interviewId', '==', interviewId)
-    .where('userId', '==', userId)
-    .orderBy('createdAt', 'desc')
-    .limit(1)
-    .get();
+    const feedback = await prisma.feedback.findFirst({
+        where: {
+            interviewId,
+            userId,
+        },
+        orderBy: { createdAt: 'desc' },
+    });
 
-    if(feedback.empty) return null;
+    if (!feedback) return null;
 
-    const feedbackDoc = feedback.docs[0];
-    return {
-        id: feedbackDoc.id,
-        ...feedbackDoc.data(),
-    } as Feedback;
+    return feedback;
 }

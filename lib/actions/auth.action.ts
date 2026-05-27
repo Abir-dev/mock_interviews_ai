@@ -1,42 +1,44 @@
 'use server';
 
-import { auth, db } from "@/firebase/admin";
+import { prisma } from "@/lib/prisma";
 import { cookies } from "next/headers";
+import { SignJWT, jwtVerify } from "jose";
+import bcrypt from "bcryptjs";
 
-const ONE_WEAK = 60 * 60 * 24 * 7 * 1000; // 5 days
+const ONE_WEEK = 60 * 60 * 24 * 7 * 1000; // 7 days
+const JWT_SECRET = new TextEncoder().encode(process.env.JWT_SECRET || 'super-secret-jwt-key');
 
-export async function signUp(params:SignUpParams) {
-    const { uid, name, email } = params;
+export async function signUp(params: SignUpParams) {
+    const { name, email, password } = params;
 
     try {
-        const userRecord = await db.collection('users').doc(uid).get();
-        if (userRecord.exists) {
+        const existingUser = await prisma.user.findUnique({
+            where: { email }
+        });
+
+        if (existingUser) {
             return {
                 success: false,
                 message: "User already exists. Please sign in instead."
             }
         }
 
-        await db.collection('users').doc(uid).set({
-            name,
-            email,
-        })
+        const hashedPassword = await bcrypt.hash(password, 10);
+
+        await prisma.user.create({
+            data: {
+                name,
+                email,
+                password: hashedPassword,
+            }
+        });
         
-        return{
-            success : true,
+        return {
+            success: true,
             message: "Account created successfully. Please sign in."
         }
-
-
     } catch (e: any) {
         console.error("Error signing up:", e);
-
-        if(e.code === 'auth/email-already-exists') {
-            return {
-                success: false,
-                message: "Email already exists. Please use a different email."
-            }
-        }
 
         return {
             success: false,
@@ -45,37 +47,56 @@ export async function signUp(params:SignUpParams) {
     }
 }
 
-export async function setSessionCookie(idToken: string) {
+export async function setSessionCookie(userId: string) {
     const cookieStore = await cookies();
 
-    const sessionCookie = await auth.createSessionCookie(idToken, {
-        expiresIn: ONE_WEAK // 5 days
-    });
+    const sessionCookie = await new SignJWT({ uid: userId })
+        .setProtectedHeader({ alg: 'HS256' })
+        .setIssuedAt()
+        .setExpirationTime('7d')
+        .sign(JWT_SECRET);
 
     cookieStore.set('session', sessionCookie, {
-        maxAge: ONE_WEAK, // 5 days
+        maxAge: ONE_WEEK,
         httpOnly: true,
         secure: process.env.NODE_ENV === 'production',
         path: '/',
         sameSite: 'lax',
-    })
+    });
 }
 
 export async function signIn(params: SignInParams) {
-    const { email, idToken } = params;
+    const { email, password } = params;
 
     try {
-        const userRecord = await auth.getUserByEmail(email);
+        const userRecord = await prisma.user.findUnique({
+            where: { email }
+        });
+
         if (!userRecord) {
             return {
                 success: false,
                 message: "User not found. Please sign up."
             }
         }
-        await setSessionCookie(idToken);
-    } catch (e) {
-        console.log(e);
 
+        const isPasswordValid = await bcrypt.compare(password, userRecord.password);
+
+        if (!isPasswordValid) {
+            return {
+                success: false,
+                message: "Invalid credentials. Please try again."
+            }
+        }
+
+        await setSessionCookie(userRecord.id);
+
+        return {
+            success: true,
+            message: "Signed in successfully."
+        };
+    } catch (e) {
+        console.error("Error signing in:", e);
         return {
             success: false,
             message: "Failed to log into an account."
@@ -83,7 +104,7 @@ export async function signIn(params: SignInParams) {
     }
 }
 
-export async function getCurrentUser(): Promise<User | null> {
+export async function getCurrentUser() {
     const cookieStore = await cookies();
     const sessionCookie = cookieStore.get('session')?.value;
 
@@ -91,27 +112,28 @@ export async function getCurrentUser(): Promise<User | null> {
         return null;
 
     try {
-        const decodedClaims = await auth.verifySessionCookie(sessionCookie, true);
+        const { payload } = await jwtVerify(sessionCookie, JWT_SECRET);
+        
+        if (!payload.uid) return null;
 
-        const userRecord = await db.collection('users').doc(decodedClaims.uid).get();
+        const userRecord = await prisma.user.findUnique({
+            where: { id: payload.uid as string }
+        });
 
-        if (!userRecord.exists) return null;
+        if (!userRecord) return null;
 
         return {
-            ...userRecord.data(),
             id: userRecord.id,
-        } as User;
+            name: userRecord.name,
+            email: userRecord.email,
+        };
     } catch (e) {
-        console.log(e)
-
+        console.error("Error verifying session:", e);
         return null;
     }
 }
 
 export async function isAuthenticated() {
     const user = await getCurrentUser();
-
     return !!user; 
 }
-
-
